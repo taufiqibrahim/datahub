@@ -1,11 +1,13 @@
 import logging
 import re
 from dataclasses import dataclass, field
+from sys import platform
 from typing import Dict, Iterable, List, Optional
 
 import requests
 from pydantic import BaseModel
 from sqlalchemy.engine.url import make_url
+from urllib.parse import parse_qs, urlparse
 
 import datahub.emitter.mce_builder as builder
 import datahub.metadata.schema_classes as models
@@ -51,6 +53,13 @@ class DebeziumParser:
 @dataclass
 class JdbcParser:
     db_connection_url: Optional[str]
+
+
+@dataclass
+class JdbcSinkParser:
+    platform: str
+    database: str
+    schema: Optional[str] = None
 
 
 @dataclass
@@ -240,6 +249,97 @@ class DebeziumSourceConnectorLineages:
         return lineages
 
 
+def get_jdbc_sink_connector_parser(
+    connector_manifest: ConnectorManifest,
+) -> JdbcSinkParser:
+    connection_url = connector_manifest.config.get("connection.url")
+    url = remove_prefix(str(connection_url), "jdbc:")
+    parsed = urlparse(url.replace('jdbc:', ''))
+
+    if parsed.scheme == 'sqlserver':
+        host_plus_database = parsed.netloc.split(';')
+        schema = 'dbo'
+        parser = JdbcSinkParser(
+            platform='mssql',
+            database=host_plus_database[1].split('=')[1],
+            schema=schema,
+        )
+
+    elif parsed.scheme == 'postgresql':
+        schema = parse_qs(parsed.query).get('currentSchema', 'public')[0]
+        database = parsed.path.strip("/")
+        parser = JdbcSinkParser(
+            platform='postgres',
+            database=database,
+            schema=schema,
+        )
+    else:
+        raise ValueError(f"JDBC sink '{parsed.scheme}' not yet implemented.")
+
+    return parser
+
+
+@dataclass
+class JDBCSinkConnectorLineages:
+    connector_manifest: ConnectorManifest
+
+    def get_regex_router(self):
+        self.regex_router = None
+        self.regex_router_regex = None
+        self.regex_router_replacement = None
+
+        for k, v in self.connector_manifest.config.items():
+            if str(v).__eq__('org.apache.kafka.connect.transforms.RegexRouter'):
+                self.regex_router = '.'.join(k.split('.')[:2])
+
+        if self.regex_router is not None:
+            self.regex_router_regex = self.connector_manifest.config.get(f'{self.regex_router}.regex')
+            self.regex_router_replacement = self.connector_manifest.config.get(f'{self.regex_router}.replacement').replace('$', '\\')
+
+    def get_table_name(self, topic: str):
+        """
+        Parse data mapping based on https://docs.confluent.io/kafka-connect-jdbc/current/sink-connector/sink_config_options.html#data-mapping
+        """
+        table_name_format = self.connector_manifest.config.get('table.name.format', "${topic}").replace('$', '')
+
+        if self.regex_router is not None:
+            topic_replaced = re.sub(self.regex_router_regex, self.regex_router_replacement, topic)
+            table_name = table_name_format.format(topic=topic_replaced)
+        else:
+            table_name = table_name_format.format(topic=topic)
+        return table_name
+
+    def get_lineages(self):
+        self.get_regex_router()
+        lineages: List[KafkaConnectLineage] = list()
+        parser = get_jdbc_sink_connector_parser(self.connector_manifest)
+        target_platform = parser.platform
+        database = parser.database
+        schema = parser.schema
+        topics = self.connector_manifest.config.get('topics')
+        topics_regex = self.connector_manifest.config.get('topics.regex')
+
+        if topics is None and topics_regex is None:
+            return lineages
+
+        for topic in self.connector_manifest.topic_names:
+            table_name = self.get_table_name(topic=topic)
+            table_name = (
+                database + '.' + schema + '.' + self.get_table_name(topic=topic)
+                if schema
+                else database + '.' + self.get_table_name(topic=topic)
+            )
+
+            lineage = KafkaConnectLineage(
+                source_dataset=topic,
+                source_platform='kafka',
+                target_dataset=table_name,
+                target_platform=target_platform,
+            )
+            lineages.append(lineage)
+        return lineages
+
+
 class KafkaConnectSource(Source):
     """The class for Kafka Connect source.
 
@@ -334,12 +434,29 @@ class KafkaConnectSource(Source):
                         continue
 
             if connector_manifest.type == "sink":
-                # TODO: Sink Connector not yet implemented
-                self.report.report_dropped(connector_manifest.name)
-                logger.warning(
-                    f"Skipping connector {connector_manifest.name}. Sink Connector not yet implemented"
+                topics_response = self.session.get(
+                    f"{self.config.connect_uri}/connectors/{c}/topics",
                 )
-                pass
+
+                topics = topics_response.json()
+                connector_manifest.topic_names = topics[c]["topics"]
+
+                # JDBC source connector lineages
+                if connector_manifest.config.get("connector.class").__eq__(
+                    "io.confluent.connect.jdbc.JdbcSinkConnector"
+                ):
+                    jdbc_sink_lineages = JDBCSinkConnectorLineages(
+                        connector_manifest=connector_manifest
+                    )
+                    connector_manifest.lineages.extend(
+                        jdbc_sink_lineages.get_lineages()
+                    )
+
+                else:
+                    self.report.report_dropped(connector_manifest.name)
+                    logger.warning(
+                        f"Skipping connector {connector_manifest.name}. Sink connector class={connector_manifest.config.get('connector.class')} not yet implemented"
+                    )
 
             connectors_manifest.append(connector_manifest)
 
