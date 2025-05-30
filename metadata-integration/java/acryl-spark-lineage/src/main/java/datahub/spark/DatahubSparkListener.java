@@ -75,7 +75,46 @@ public class DatahubSparkListener extends SparkListener {
   private boolean isDisabled;
 
   public DatahubSparkListener() throws URISyntaxException {
-    listener = new OpenLineageSparkListener();
+    SparkConf sparkConfiguration = null;
+
+    // Attempt to retrieve SparkConf
+    // 1. Try from active SparkContext
+    Option<SparkContext> scOpt = activeSparkContext.apply();
+    if (scOpt.isDefined() && scOpt.get() != null) {
+      sparkConfiguration = scOpt.get().getConf();
+      if (sparkConfiguration != null) {
+        log.debug("Retrieved SparkConf from active SparkContext for OpenLineageSparkListener.");
+      }
+    }
+
+    // 2. If not found via active SparkContext, try from SparkEnv
+    if (sparkConfiguration == null) {
+      SparkEnv env = SparkEnv$.MODULE$.get();
+      if (env != null) {
+        sparkConfiguration = env.conf();
+        if (sparkConfiguration != null) {
+          log.debug("Retrieved SparkConf from SparkEnv for OpenLineageSparkListener.");
+        }
+      }
+    }
+
+    // 3. If still not found (e.g., very early in lifecycle or standalone test),
+    //    create a new SparkConf. This might lack application-specific settings
+    //    but is necessary if the constructor strictly requires a SparkConf object.
+    if (sparkConfiguration == null) {
+      log.warn(
+          "Could not obtain SparkConf from active SparkContext or SparkEnv. "
+              + "Initializing OpenLineageSparkListener with a new default SparkConf(true). "
+              + "This may lead to incomplete OpenLineage configuration if critical settings are missing.");
+      sparkConfiguration = new SparkConf(true); // true to load spark-defaults if available
+    }
+
+    // Initialize the listener with the obtained SparkConf.
+    // This directly addresses the compilation error:
+    // "constructor OpenLineageSparkListener in class OpenLineageSparkListener cannot be applied to
+    // given types;"
+    // "required: SparkConf, found: no arguments"
+    this.listener = new OpenLineageSparkListener(sparkConfiguration);
   }
 
   private static SparkAppContext getSparkAppContext(
