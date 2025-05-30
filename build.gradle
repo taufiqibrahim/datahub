@@ -64,6 +64,7 @@ buildscript {
   ext.openLineageVersion = '1.25.0'
   ext.logbackClassicJava8 = '1.2.12'
   ext.awsSdk2Version = '2.30.33'
+  ext.sparkVersion = '3.5.3'
 
   ext.docker_registry = project.getProperties().getOrDefault("dockerRegistry", 'acryldata')
 
