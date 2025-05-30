@@ -9,6 +9,10 @@ apply plugin: 'maven-publish'
 apply from: '../../../gradle/coverage/java-coverage.gradle'
 apply from: '../versioning.gradle'
 
+repositories {
+    mavenCentral() // Ensure this is present
+}
+
 jar.enabled = false // Since we only want to build shadow jars, disabling the regular jar creation
 
 //to rename artifacts for publish
@@ -57,14 +61,17 @@ dependencies {
   //implementation "io.acryl:datahub-client:0.10.2"
   implementation "io.openlineage:openlineage-spark_2.12:$openLineageVersion"
   compileOnly "org.apache.iceberg:iceberg-spark3-runtime:0.12.1"
-  compileOnly("org.apache.spark:spark-sql_2.12:3.1.3") {
+  compileOnly("org.apache.spark:spark-sql_2.12:3.5.3") {
     exclude group: 'org.eclipse.jetty', module: 'jetty-servlet'
     exclude group: 'org.eclipse.jetty', module: 'jetty-server'
     exclude group: 'org.eclipse.jetty', module: 'jetty-util'
     exclude group: 'org.eclipse.jetty', module: 'jetty-webapp'
     exclude group: 'org.eclipse.jetty', module: 'jetty-security'
+    // *** Add this line to exclude avro-mapred from spark-sql_2.12's transitive dependencies ***
+    exclude group: 'org.apache.avro', module: 'avro-mapred'
   }
   compileOnly "io.github.spark-redshift-community:spark-redshift_2.12:6.2.0-spark_3.5"
+  compileOnly 'org.apache.spark:spark-hive_2.12:3.5.3'
 
   testCompileOnly externalDependency.lombok
   testAnnotationProcessor externalDependency.lombok
